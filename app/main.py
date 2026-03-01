@@ -11,7 +11,7 @@ from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
-from .rag import RAGService
+from .rag_engine import RAGService
 
 load_dotenv(Path(__file__).parent.parent / ".env")
 API_KEY_PREVIEW = os.environ.get("NVIDIA_API_KEY", "NOT_FOUND")[:12]

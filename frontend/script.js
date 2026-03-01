@@ -7,11 +7,11 @@ const state = {
   indexedFiles: new Map(),
   isIndexing: false,
   isQuerying: false,
-  sidebarOpen: true,
+  sidebarOpen: window.innerWidth > 768, // Открыт по умолчанию только на ПК
 };
 
 const MAX_FILE_SIZE = 50 * 1024 * 1024;
-const ALLOWED_EXTS =['txt', 'md', 'pdf', 'docx'];
+const ALLOWED_EXTS = ['txt', 'md', 'pdf', 'docx'];
 
 const DOM = {
   app: document.getElementById('app'),
@@ -27,14 +27,31 @@ const DOM = {
   btnSend: document.getElementById('btn-send'),
   apiStatus: document.getElementById('api-status'),
   chunksStatus: document.querySelector('#chunks-status .dot'),
-  chunksCount: document.getElementById('chunks-count')
+  chunksCount: document.getElementById('chunks-count'),
+  toastContainer: document.getElementById('toast-container')
 };
 
+// --- Инициализация состояния ---
+if (!state.sidebarOpen) {
+  DOM.app.classList.add('sidebar-collapsed');
+}
+
+// --- Улучшенная система уведомлений (Stackable Toasts) ---
 function toast(msg, type = 'info', duration = 4000) {
-  const el = document.getElementById('toast');
+  const el = document.createElement('div');
+  el.className = `toast toast-${type}`;
   el.textContent = msg;
-  el.className = `show toast-${type}`;
-  setTimeout(() => { if (el.textContent === msg) el.className = ''; }, duration);
+  
+  DOM.toastContainer.appendChild(el);
+  
+  // Trigger reflow для анимации
+  el.offsetHeight; 
+  el.classList.add('show');
+  
+  setTimeout(() => {
+    el.classList.remove('show');
+    setTimeout(() => el.remove(), 300); // Ожидание завершения CSS-transition
+  }, duration);
 }
 
 function formatBytes(b) {
@@ -45,18 +62,23 @@ function formatBytes(b) {
 
 function getExt(name) { return name.split('.').pop().toLowerCase(); }
 
+// Правильный скролл через requestAnimationFrame
 function scrollToBottom() {
-  setTimeout(() => { DOM.chatMessages.scrollTop = DOM.chatMessages.scrollHeight; }, 50);
+  requestAnimationFrame(() => {
+    DOM.chatMessages.scrollTop = DOM.chatMessages.scrollHeight;
+  });
 }
 
+// --- Обработчики событий ---
 DOM.btnToggle.addEventListener('click', () => {
   state.sidebarOpen = !state.sidebarOpen;
   DOM.app.classList.toggle('sidebar-collapsed', !state.sidebarOpen);
   DOM.btnToggle.title = state.sidebarOpen ? 'Скрыть панель' : 'Показать панель';
 });
 
+// Плавный ресайз поля ввода
 DOM.chatInput.addEventListener('input', function() {
-  this.style.height = '46px';
+  this.style.height = 'auto'; // Сброс высоты перед вычислением
   this.style.height = Math.min(this.scrollHeight, 150) + 'px';
 });
 
@@ -69,9 +91,18 @@ DOM.chatInput.addEventListener('keydown', (e) => {
 
 DOM.btnSend.addEventListener('click', sendMessage);
 
+// Делегирование событий для кнопок удаления (Оптимизация производительности)
+DOM.fileList.addEventListener('click', (e) => {
+  const deleteBtn = e.target.closest('.file-delete');
+  if (deleteBtn) {
+    deleteFile(deleteBtn.dataset.id);
+  }
+});
+
 async function checkHealth() {
   try {
     const r = await fetch(`${API}/health`);
+    if (!r.ok) throw new Error('API Offline');
     const d = await r.json();
     DOM.apiStatus.innerHTML = '<div class="dot dot-green"></div><span>connected</span>';
     updateChunksCount(d.chunks_indexed);
@@ -98,13 +129,11 @@ async function loadIndexedDocs() {
   }
 }
 
-window.addEventListener("dragover", e => e.preventDefault(), false);
-window.addEventListener("drop", e => e.preventDefault(), false);
+// --- Drag & Drop ---['dragover', 'drop'].forEach(evt => window.addEventListener(evt, e => e.preventDefault(), false));
 
-DOM.uploadZone.addEventListener('dragover', e => { e.preventDefault(); DOM.uploadZone.classList.add('drag-over'); });
+DOM.uploadZone.addEventListener('dragover', () => DOM.uploadZone.classList.add('drag-over'));
 DOM.uploadZone.addEventListener('dragleave', () => DOM.uploadZone.classList.remove('drag-over'));
 DOM.uploadZone.addEventListener('drop', e => {
-  e.preventDefault();
   DOM.uploadZone.classList.remove('drag-over');
   handleFiles(e.dataTransfer.files);
 });
@@ -126,22 +155,15 @@ async function handleFiles(files) {
       toast(`Файл ${file.name} слишком большой (макс 50MB)`, 'err');
       continue;
     }
-    // Запускаем асинхронно
     uploadPromises.push(uploadFile(file));
   }
-  
-  // Дожидаемся всех загрузок
-  await Promise.all(uploadPromises);
+  await Promise.allSettled(uploadPromises);
 }
 
 async function uploadFile(file) {
   const tempId = 'tmp_' + Math.random().toString(36).slice(2);
   state.pendingFiles.set(tempId, {
-    tempId,
-    file_name: file.name,
-    ext: getExt(file.name),
-    size: formatBytes(file.size),
-    status: 'uploading',
+    tempId, file_name: file.name, ext: getExt(file.name), size: formatBytes(file.size), status: 'uploading',
   });
   renderFileList();
 
@@ -155,11 +177,7 @@ async function uploadFile(file) {
 
     state.pendingFiles.delete(tempId);
     state.pendingFiles.set(d.file_id, {
-      file_id: d.file_id,
-      file_name: d.file_name,
-      ext: getExt(d.file_name),
-      chars: d.chars,
-      status: 'pending',
+      file_id: d.file_id, file_name: d.file_name, ext: getExt(d.file_name), chars: d.chars, status: 'pending',
     });
     toast(`Загружено: ${d.file_name}`, 'ok');
   } catch (e) {
@@ -172,7 +190,7 @@ async function uploadFile(file) {
   updateIndexButton();
 }
 
-window.deleteFile = async function(fid) {
+async function deleteFile(fid) {
   if (state.pendingFiles.has(fid)) {
     state.pendingFiles.delete(fid);
   } else if (state.indexedFiles.has(fid)) {
@@ -190,10 +208,7 @@ window.deleteFile = async function(fid) {
 }
 
 function renderFileList() {
-  const allFiles =[
-    ...Array.from(state.pendingFiles.values()),
-    ...Array.from(state.indexedFiles.values()),
-  ];
+  const allFiles = [...state.pendingFiles.values(), ...state.indexedFiles.values()];
 
   if (allFiles.length === 0) {
     DOM.fileList.innerHTML = '<div class="empty-list">Нет загруженных файлов</div>';
@@ -206,26 +221,29 @@ function renderFileList() {
 
   DOM.fileList.innerHTML = allFiles.map(f => {
     const statusMap = {
-      uploading:['загрузка…', 'status-indexing'],
-      pending:['ожидает',    'status-pending'],
-      indexing:  ['индексация…','status-indexing'],
+      uploading: ['загрузка…', 'status-indexing'],
+      pending:   ['ожидает',    'status-pending'],
+      indexing:['индексация…','status-indexing'],
       indexed:[`${f.chunks || '?'} чанков`, 'status-indexed'],
-      error:['ошибка',      'status-error'],
+      error:     ['ошибка',      'status-error'],
     };
     const [statusText, statusClass] = statusMap[f.status] || ['неизвестно', ''];
-    const isDeletable =['indexed', 'pending', 'error'].includes(f.status);
+    const isDeletable = ['indexed', 'pending', 'error'].includes(f.status);
     const fid = f.file_id || f.tempId;
-
     const ext = f.ext || (f.file_type ? f.file_type.replace('.', '') : null) || getExt(f.file_name) || '?';
+
+    // XSS защита: экранирование имени файла в атрибутах
+    const safeName = f.file_name.replace(/"/g, '&quot;');
+    
     return `
       <div class="file-item">
         <div class="file-icon">${ext}</div>
         <div class="file-info">
-          <div class="file-name" title="${f.file_name}">${f.file_name}</div>
+          <div class="file-name" title="${safeName}">${safeName}</div>
           <div class="file-meta">${f.chars ? (f.chars/1000).toFixed(1)+'k симв.' : (f.size || '')}</div>
         </div>
         <div class="file-status ${statusClass}">${statusText}</div>
-        ${isDeletable ? `<button class="file-delete" onclick="deleteFile('${fid}')" title="Удалить">×</button>` : ''}
+        ${isDeletable ? `<button class="file-delete" data-id="${fid}" title="Удалить">×</button>` : ''}
       </div>
     `;
   }).join('');
@@ -234,9 +252,7 @@ function renderFileList() {
 function updateIndexButton() {
   const pending = Array.from(state.pendingFiles.values()).filter(f => f.status === 'pending');
   DOM.btnIndex.disabled = pending.length === 0 || state.isIndexing;
-  DOM.btnIndexText.textContent = pending.length > 0
-    ? `ИНДЕКСИРОВАТЬ (${pending.length})`
-    : 'ИНДЕКСИРОВАТЬ';
+  DOM.btnIndexText.textContent = pending.length > 0 ? `ИНДЕКСИРОВАТЬ (${pending.length})` : 'ИНДЕКСИРОВАТЬ';
 }
 
 DOM.btnIndex.addEventListener('click', async () => {
@@ -261,15 +277,17 @@ DOM.btnIndex.addEventListener('click', async () => {
     });
     const d = await r.json();
 
-    for (const res of d.indexed) {
+    d.indexed.forEach(res => {
       state.pendingFiles.delete(res.file_id);
       state.indexedFiles.set(res.file_id, { ...res, status: 'indexed' });
-    }
-    for (const err of d.errors) {
+    });
+    
+    d.errors.forEach(err => {
       const f = state.pendingFiles.get(err.file_id);
       if (f) f.status = 'error';
-      toast(`Ошибка индексации: ${err.error}`, 'err', 5000);
-    }
+      toast(`Ошибка: ${err.error}`, 'err', 5000);
+    });
+    
     if (d.indexed.length > 0) toast(`Успешно проиндексировано: ${d.indexed.length}`, 'ok');
   } catch (e) {
     toast(`Сбой сети: ${e.message}`, 'err');
@@ -286,18 +304,10 @@ DOM.btnIndex.addEventListener('click', async () => {
 function formatMessage(text) {
   try {
     let html = marked.parse(text);
-    // Фикс для корректного отображения блоков кода внутри Markdown-таблиц
+    // Оптимизированный фикс для кода внутри таблиц
     html = html.replace(/<code>([\s\S]*?)<\/code>/g, (match, content) => {
       if (content.match(/&lt;br\s*\/?&gt;/i)) {
         let unescaped = content.replace(/&lt;br\s*\/?&gt;/gi, '\n');
-        const lines = unescaped.split('\n');
-        const firstLine = lines[0].trim().toLowerCase();
-        const langs =['bash', 'sh', 'python', 'js', 'javascript', 'json', 'env', 'dotenv', 'html', 'css', 'yaml', 'sql'];
-        
-        if (langs.includes(firstLine)) {
-          lines.shift();
-          return `<pre><code class="language-${firstLine}">${lines.join('\n').trim()}</code></pre>`;
-        }
         return `<pre><code>${unescaped.trim()}</code></pre>`;
       }
       return match;
@@ -348,18 +358,16 @@ function appendMessage(role, content, meta = null) {
           <div class="source-score">${Math.round(s.score * 100)}%</div>
           <div>
             <div class="source-file">${s.file_name} · фрагмент ${s.chunk_index + 1}</div>
-            <div class="source-preview">${s.preview}</div>
+            <div class="source-preview">${s.preview.replace(/</g, '&lt;')}</div>
           </div>
         </div>
       `).join('');
 
       const toggle = document.createElement('button');
       toggle.className = 'sources-toggle';
-      const n = meta.sources.length;
       
       const updateToggleText = () => {
-        const isOpen = panel.classList.contains('open');
-        toggle.innerHTML = `${isOpen ? 'Скрыть' : 'Показать'} источники (${n})`;
+        toggle.innerHTML = `${panel.classList.contains('open') ? 'Скрыть' : 'Показать'} источники (${meta.sources.length})`;
       };
       
       updateToggleText();
@@ -414,7 +422,7 @@ async function sendMessage() {
   }
 
   DOM.chatInput.value = '';
-  DOM.chatInput.style.height = '46px';
+  DOM.chatInput.style.height = 'auto'; // Сброс высоты
   DOM.btnSend.disabled = true;
   state.isQuerying = true;
 
@@ -436,7 +444,7 @@ async function sendMessage() {
   } catch (e) {
     typing.remove();
     appendMessage('bot', `**Ошибка:** ${e.message}`);
-    toast(`Не удалось получить ответ: ${e.message}`, 'err');
+    toast(`Не удалось получить ответ`, 'err');
   }
 
   state.isQuerying = false;
@@ -444,6 +452,7 @@ async function sendMessage() {
   DOM.chatInput.focus();
 }
 
+// Запуск
 checkHealth();
 loadIndexedDocs();
 setInterval(checkHealth, 30000);
