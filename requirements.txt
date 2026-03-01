@@ -1,0 +1,16 @@
+fastapi
+uvicorn
+python-multipart
+openai
+chromadb
+pypdf
+pdfplumber
+python-docx
+pydantic
+python-dotenv
+rank-bm25
+tenacity
+langgraph
+langchain-openai
+langchain-core
+tenacity

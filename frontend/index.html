@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>RAG · Document Intelligence</title>
+  
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/9.1.6/marked.min.js"></script>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<div class="app" id="app">
+  <!-- Header -->
+  <header class="header">
+    <button class="btn-sidebar-toggle" id="btn-sidebar-toggle" title="Скрыть/Показать боковую панель">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="12" x2="21" y2="12"></line><line x1="3" y1="6" x2="21" y2="6"></line><line x1="3" y1="18" x2="21" y2="18"></line></svg>
+    </button>
+    <div class="logo">
+      <div class="logo-dot"></div>
+      RAG / Document Intelligence
+    </div>
+    <div class="header-status">
+      <div class="status-pill" id="api-status">
+        <div class="dot dot-yellow"></div>
+        <span>checking...</span>
+      </div>
+      <div class="status-pill" id="chunks-status">
+        <div class="dot dot-green" style="opacity:0.4"></div>
+        <span id="chunks-count">0 chunks</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- Sidebar -->
+  <aside class="sidebar">
+    <div class="sidebar-section">
+      <div class="section-label">Загрузка документов</div>
+      <div class="upload-zone" id="upload-zone">
+        <input type="file" id="file-input" multiple accept=".txt,.md,.pdf,.docx">
+        <div class="upload-icon">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>
+        </div>
+        <div class="upload-text">Перетащите файлы сюда<br>или нажмите для выбора</div>
+        <div class="upload-formats">txt · md · pdf · docx (до 50 МБ)</div>
+      </div>
+    </div>
+
+    <div class="section-label" style="padding: 12px 16px 4px; display: flex; justify-content: space-between;">
+      <span>Файлы <span id="pending-count" style="color:var(--text-muted);font-size:10px;"></span></span>
+    </div>
+    <div class="file-list" id="file-list">
+      <div class="empty-list">Нет загруженных файлов</div>
+    </div>
+
+    <div class="index-section">
+      <button class="btn-index" id="btn-index" disabled>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path><polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline><line x1="12" y1="22.08" x2="12" y2="12"></line></svg>
+        <span id="btn-index-text">ИНДЕКСИРОВАТЬ</span>
+      </button>
+    </div>
+  </aside>
+
+  <!-- Chat Area -->
+  <main class="chat-area">
+    <div class="chat-messages" id="chat-messages">
+      <div class="empty-state" id="empty-state">
+        <div class="empty-icon">
+          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+        </div>
+        <div class="empty-title">Готов к работе</div>
+        <div class="empty-hint">
+          Загрузите документы в панели слева,<br>
+          нажмите <strong style="color:var(--accent)">ИНДЕКСИРОВАТЬ</strong>, затем задавайте вопросы.
+        </div>
+      </div>
+    </div>
+
+    <div class="chat-input-area">
+      <div class="input-row">
+        <textarea
+          class="chat-input"
+          id="chat-input"
+          placeholder="Задайте вопрос по вашим документам..."
+          rows="1"
+        ></textarea>
+        <button class="btn-send" id="btn-send" title="Отправить (Enter)">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
+        </button>
+      </div>
+      <div class="input-hint">Enter — отправить · Shift+Enter — перенос строки</div>
+    </div>
+  </main>
+</div>
+
+<div id="toast"></div>
+
+<!-- Scripts -->
+<script src="/static/script.js"></script>
+</body>
+</html>
