@@ -1,6 +1,9 @@
 const API = window.location.origin;
 
-marked.setOptions({ breaks: true, gfm: true });
+marked.setOptions({
+  breaks: true,
+  gfm: true
+});
 
 const state = {
   pendingFiles: new Map(),
@@ -388,6 +391,12 @@ function appendMessage(role, content, meta = null) {
   el.appendChild(avatar);
   el.appendChild(contentDiv);
   DOM.chatMessages.appendChild(el);
+
+  // Подсветка синтаксиса
+  el.querySelectorAll('pre code').forEach((block) => {
+    hljs.highlightElement(block);
+  });
+
   scrollToBottom();
 
   return el;
