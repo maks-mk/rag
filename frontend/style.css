@@ -70,6 +70,64 @@ html, body {
 .sidebar-section { padding: 16px; border-bottom: 1px solid var(--border); }
 .section-label { font-family: var(--mono); font-size: 11px; font-weight: 500; letter-spacing: 0.1em; color: var(--text-muted); text-transform: uppercase; margin-bottom: 12px; }
 
+/* Bypass Toggle Switch */
+.bypass-toggle {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  cursor: pointer;
+  padding: 10px 12px;
+  border-radius: 6px;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  transition: all 0.2s;
+}
+.bypass-toggle:hover {
+  border-color: var(--border-bright);
+  background: rgba(255,255,255,0.03);
+}
+.bypass-toggle input {
+  display: none;
+}
+.toggle-slider {
+  position: relative;
+  width: 40px;
+  height: 22px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  transition: all 0.3s;
+  flex-shrink: 0;
+}
+.toggle-slider::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  background: var(--text-dim);
+  border-radius: 50%;
+  transition: all 0.3s;
+}
+.bypass-toggle input:checked + .toggle-slider {
+  background: var(--accent-dim);
+  border-color: var(--accent);
+}
+.bypass-toggle input:checked + .toggle-slider::after {
+  left: 20px;
+  background: var(--accent);
+  box-shadow: 0 0 8px var(--accent);
+}
+.toggle-label {
+  font-size: 13px;
+  color: var(--text);
+  user-select: none;
+}
+.bypass-toggle input:checked ~ .toggle-label {
+  color: var(--accent);
+}
+
 .upload-zone {
   border: 1px dashed var(--border-bright); border-radius: 8px; padding: 24px 16px; text-align: center;
   cursor: pointer; transition: all 0.2s; position: relative; overflow: hidden; background: rgba(255,255,255,0.01);

@@ -13,4 +13,4 @@ tenacity
 langgraph
 langchain-openai
 langchain-core
-tenacity
+langchain_text_splitters

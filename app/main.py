@@ -37,6 +37,10 @@ class QueryRequest(BaseModel):
     question: str = Field(..., min_length=2, description="Вопрос пользователя")
     top_k: int    = Field(7, ge=1, le=20, description="Количество извлекаемых фрагментов")
 
+class BypassChatRequest(BaseModel):
+    message: str = Field(..., min_length=1, description="Сообщение пользователя")
+    history: list[dict] = Field(default=None, description="История разговора")
+
 class IndexRequest(BaseModel):
     file_ids: list[str] = Field(..., min_length=1)
 
@@ -110,6 +114,17 @@ async def query(req: QueryRequest):
     except Exception as e:
         logger.error(f"Query error: {e}", exc_info=True)
         raise HTTPException(500, "Internal Server Error during query execution.")
+
+    return result
+
+@app.post("/bypass")
+async def bypass_chat(req: BypassChatRequest):
+    """Прямое общение с моделью без RAG."""
+    try:
+        result = await rag.bypass_chat(req.message, req.history)
+    except Exception as e:
+        logger.error(f"Bypass chat error: {e}", exc_info=True)
+        raise HTTPException(500, "Internal Server Error during bypass chat.")
 
     return result
 

@@ -1,7 +1,8 @@
-from typing import TypedDict
+from typing import TypedDict, List, Optional
 
 class RAGState(TypedDict):
     question:         str
+    queries:          List[str]  # Хранит оригинальный + сгенерированные запросы
     top_k:            int
     chunks:           list[tuple[str, dict, float, str, float]]
     answer:           str

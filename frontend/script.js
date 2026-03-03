@@ -11,6 +11,8 @@ const state = {
   isIndexing: false,
   isQuerying: false,
   sidebarOpen: window.innerWidth > 768, // Открыт по умолчанию только на ПК
+  bypassMode: false, // Режим прямого чата без RAG
+  chatHistory: [], // История разговора для bypass режима
 };
 
 const MAX_FILE_SIZE = 50 * 1024 * 1024;
@@ -31,13 +33,25 @@ const DOM = {
   apiStatus: document.getElementById('api-status'),
   chunksStatus: document.querySelector('#chunks-status .dot'),
   chunksCount: document.getElementById('chunks-count'),
-  toastContainer: document.getElementById('toast-container')
+  toastContainer: document.getElementById('toast-container'),
+  bypassCheckbox: document.getElementById('bypass-mode'),
 };
 
 // --- Инициализация состояния ---
 if (!state.sidebarOpen) {
   DOM.app.classList.add('sidebar-collapsed');
 }
+
+// Обработчик bypass режима
+DOM.bypassCheckbox.addEventListener('change', (e) => {
+  state.bypassMode = e.target.checked;
+  if (state.bypassMode) {
+    toast('Включён режим прямого чата (без RAG)', 'info');
+  } else {
+    state.chatHistory = []; // Очищаем историю при выключении
+    toast('Включён режим RAG', 'info');
+  }
+});
 
 // --- Улучшенная система уведомлений (Stackable Toasts) ---
 function toast(msg, type = 'info', duration = 4000) {
@@ -329,8 +343,9 @@ function appendMessage(role, content, meta = null) {
   el.className = `message ${role}`;
 
   const avatar = document.createElement('div');
+  const isBypass = meta && meta.bypass;
   avatar.className = `msg-avatar ${role === 'user' ? 'user-av' : 'bot-av'}`;
-  avatar.textContent = role === 'user' ? 'ВЫ' : 'RAG';
+  avatar.textContent = role === 'user' ? 'ВЫ' : isBypass ? 'AI' : 'RAG';
 
   const contentDiv = document.createElement('div');
   contentDiv.className = 'msg-content';
@@ -343,6 +358,14 @@ function appendMessage(role, content, meta = null) {
   if (meta && role === 'bot') {
     const metaDiv = document.createElement('div');
     metaDiv.className = 'msg-meta';
+
+    // Bypass режим - показываем модель
+    if (isBypass && meta.model) {
+      const modelBadge = document.createElement('div');
+      modelBadge.className = 'confidence-badge conf-mid';
+      modelBadge.innerHTML = `<span>🤖</span> ${meta.model}`;
+      metaDiv.appendChild(modelBadge);
+    }
 
     if (meta.confidence !== undefined) {
       const conf = meta.confidence;
@@ -406,8 +429,9 @@ function appendTyping() {
   const el = document.createElement('div');
   el.className = 'message bot';
   el.id = 'typing-indicator';
+  const avatarText = state.bypassMode ? 'AI' : 'RAG';
   el.innerHTML = `
-    <div class="msg-avatar bot-av">RAG</div>
+    <div class="msg-avatar bot-av">${avatarText}</div>
     <div class="msg-content">
       <div class="msg-bubble">
         <div class="typing-indicator">
@@ -425,7 +449,8 @@ async function sendMessage() {
   const question = DOM.chatInput.value.trim();
   if (!question || state.isQuerying) return;
 
-  if (state.indexedFiles.size === 0) {
+  // Проверка документов только в RAG режиме
+  if (!state.bypassMode && state.indexedFiles.size === 0) {
     toast('Сначала загрузите и проиндексируйте хотя бы один документ', 'info');
     return;
   }
@@ -439,17 +464,47 @@ async function sendMessage() {
   const typing = appendTyping();
 
   try {
-    const r = await fetch(`${API}/query`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ question, top_k: 7 }),
-    });
+    let d;
     
-    const d = await r.json();
-    if (!r.ok) throw new Error(d.detail || 'Query failed');
+    if (state.bypassMode) {
+      // Bypass режим - прямое общение с моделью
+      const r = await fetch(`${API}/bypass`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 
+          message: question, 
+          history: state.chatHistory 
+        }),
+      });
+      
+      d = await r.json();
+      if (!r.ok) throw new Error(d.detail || 'Bypass chat failed');
+      
+      // Добавляем в историю
+      state.chatHistory.push({ role: 'user', content: question });
+      state.chatHistory.push({ role: 'assistant', content: d.answer });
+      
+      // Ограничиваем историю
+      if (state.chatHistory.length > 20) {
+        state.chatHistory = state.chatHistory.slice(-20);
+      }
+      
+      typing.remove();
+      appendMessage('bot', d.answer, { bypass: true, model: d.model });
+    } else {
+      // RAG режим
+      const r = await fetch(`${API}/query`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ question, top_k: 7 }),
+      });
+      
+      d = await r.json();
+      if (!r.ok) throw new Error(d.detail || 'Query failed');
 
-    typing.remove();
-    appendMessage('bot', d.answer, { confidence: d.confidence, sources: d.sources });
+      typing.remove();
+      appendMessage('bot', d.answer, { confidence: d.confidence, sources: d.sources });
+    }
   } catch (e) {
     typing.remove();
     appendMessage('bot', `**Ошибка:** ${e.message}`);
