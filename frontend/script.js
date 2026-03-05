@@ -10,17 +10,22 @@ const state = {
   indexedFiles: new Map(),
   isIndexing: false,
   isQuerying: false,
-  sidebarOpen: window.innerWidth > 768, // Открыт по умолчанию только на ПК
+  sidebarOpen: true,
   bypassMode: false, // Режим прямого чата без RAG
   chatHistory: [], // История разговора для bypass режима
 };
 
 const MAX_FILE_SIZE = 50 * 1024 * 1024;
 const ALLOWED_EXTS = ['txt', 'md', 'pdf', 'docx'];
+const STORAGE_KEYS = {
+  sidebarOpen: 'rag_ui_sidebar_open',
+  bypassMode: 'rag_ui_bypass_mode',
+};
 
 const DOM = {
   app: document.getElementById('app'),
   btnToggle: document.getElementById('btn-sidebar-toggle'),
+  sidebarBackdrop: document.getElementById('sidebar-backdrop'),
   uploadZone: document.getElementById('upload-zone'),
   fileInput: document.getElementById('file-input'),
   fileList: document.getElementById('file-list'),
@@ -33,25 +38,80 @@ const DOM = {
   apiStatus: document.getElementById('api-status'),
   chunksStatus: document.querySelector('#chunks-status .dot'),
   chunksCount: document.getElementById('chunks-count'),
+  modeStatus: document.getElementById('mode-status'),
+  inputHint: document.getElementById('input-hint'),
+  quickPrompts: document.getElementById('quick-prompts'),
+  btnScrollBottom: document.getElementById('btn-scroll-bottom'),
   toastContainer: document.getElementById('toast-container'),
   bypassCheckbox: document.getElementById('bypass-mode'),
 };
 
-// --- Инициализация состояния ---
-if (!state.sidebarOpen) {
-  DOM.app.classList.add('sidebar-collapsed');
+function isMobileViewport() {
+  return window.innerWidth <= 768;
 }
 
-// Обработчик bypass режима
-DOM.bypassCheckbox.addEventListener('change', (e) => {
-  state.bypassMode = e.target.checked;
-  if (state.bypassMode) {
-    toast('Включён режим прямого чата (без RAG)', 'info');
-  } else {
-    state.chatHistory = []; // Очищаем историю при выключении
-    toast('Включён режим RAG', 'info');
+function escapeHtml(value = '') {
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function setSidebar(open, persist = true) {
+  state.sidebarOpen = !!open;
+  DOM.app.classList.toggle('sidebar-collapsed', !state.sidebarOpen);
+  DOM.app.classList.toggle('mobile-sidebar-open', isMobileViewport() && state.sidebarOpen);
+  DOM.btnToggle.title = state.sidebarOpen ? 'Скрыть панель' : 'Показать панель';
+  if (persist) localStorage.setItem(STORAGE_KEYS.sidebarOpen, state.sidebarOpen ? '1' : '0');
+}
+
+function updateModeUI() {
+  if (DOM.modeStatus) {
+    DOM.modeStatus.innerHTML = state.bypassMode
+      ? '<span class="mode-chip mode-bypass">BYPASS MODE</span>'
+      : '<span class="mode-chip mode-rag">RAG MODE</span>';
   }
-});
+  if (DOM.inputHint) {
+    DOM.inputHint.textContent = state.bypassMode
+      ? 'Режим bypass: ответ без документов · Enter — отправить'
+      : 'Enter — отправить · Shift+Enter — перенос строки';
+  }
+  DOM.chatInput.placeholder = state.bypassMode
+    ? 'Напишите сообщение (прямой чат с моделью)...'
+    : 'Задайте вопрос по вашим документам...';
+}
+
+function setBypassMode(enabled, { persist = true, notify = true } = {}) {
+  state.bypassMode = !!enabled;
+  DOM.bypassCheckbox.checked = state.bypassMode;
+  if (!state.bypassMode) {
+    state.chatHistory = [];
+  }
+  updateModeUI();
+  if (persist) localStorage.setItem(STORAGE_KEYS.bypassMode, state.bypassMode ? '1' : '0');
+  if (notify) {
+    toast(state.bypassMode ? 'Включён режим прямого чата (без RAG)' : 'Включён режим RAG', 'info');
+  }
+}
+
+function updateScrollBottomButton() {
+  if (!DOM.btnScrollBottom) return;
+  const hiddenDistance = DOM.chatMessages.scrollHeight - DOM.chatMessages.scrollTop - DOM.chatMessages.clientHeight;
+  DOM.btnScrollBottom.classList.toggle('show', hiddenDistance > 220);
+}
+
+function setSendLoading(loading) {
+  DOM.btnSend.disabled = loading;
+  DOM.btnSend.classList.toggle('loading', loading);
+}
+
+// --- Инициализация состояния ---
+const savedSidebarOpen = localStorage.getItem(STORAGE_KEYS.sidebarOpen);
+const savedBypassMode = localStorage.getItem(STORAGE_KEYS.bypassMode);
+setSidebar(savedSidebarOpen === null ? !isMobileViewport() : savedSidebarOpen === '1', false);
+setBypassMode(savedBypassMode === '1', { persist: false, notify: false });
 
 // --- Улучшенная система уведомлений (Stackable Toasts) ---
 function toast(msg, type = 'info', duration = 4000) {
@@ -80,17 +140,38 @@ function formatBytes(b) {
 function getExt(name) { return name.split('.').pop().toLowerCase(); }
 
 // Правильный скролл через requestAnimationFrame
-function scrollToBottom() {
+function scrollToBottom({ smooth = false } = {}) {
   requestAnimationFrame(() => {
-    DOM.chatMessages.scrollTop = DOM.chatMessages.scrollHeight;
+    if (smooth) {
+      DOM.chatMessages.scrollTo({ top: DOM.chatMessages.scrollHeight, behavior: 'smooth' });
+    } else {
+      DOM.chatMessages.scrollTop = DOM.chatMessages.scrollHeight;
+    }
+    updateScrollBottomButton();
   });
 }
 
 // --- Обработчики событий ---
 DOM.btnToggle.addEventListener('click', () => {
-  state.sidebarOpen = !state.sidebarOpen;
-  DOM.app.classList.toggle('sidebar-collapsed', !state.sidebarOpen);
-  DOM.btnToggle.title = state.sidebarOpen ? 'Скрыть панель' : 'Показать панель';
+  setSidebar(!state.sidebarOpen);
+});
+
+DOM.bypassCheckbox.addEventListener('change', (e) => {
+  setBypassMode(e.target.checked);
+});
+
+DOM.sidebarBackdrop?.addEventListener('click', () => {
+  if (isMobileViewport()) setSidebar(false);
+});
+
+window.addEventListener('resize', () => {
+  DOM.app.classList.toggle('mobile-sidebar-open', isMobileViewport() && state.sidebarOpen);
+});
+
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && isMobileViewport() && state.sidebarOpen) {
+    setSidebar(false);
+  }
 });
 
 // Плавный ресайз поля ввода
@@ -107,6 +188,17 @@ DOM.chatInput.addEventListener('keydown', (e) => {
 });
 
 DOM.btnSend.addEventListener('click', sendMessage);
+DOM.btnScrollBottom?.addEventListener('click', () => scrollToBottom({ smooth: true }));
+DOM.chatMessages.addEventListener('scroll', updateScrollBottomButton);
+
+DOM.quickPrompts?.addEventListener('click', (e) => {
+  const promptBtn = e.target.closest('.quick-prompt');
+  if (!promptBtn) return;
+  const prompt = promptBtn.dataset.prompt || '';
+  DOM.chatInput.value = prompt;
+  DOM.chatInput.dispatchEvent(new Event('input'));
+  DOM.chatInput.focus();
+});
 
 // Делегирование событий для кнопок удаления (Оптимизация производительности)
 DOM.fileList.addEventListener('click', (e) => {
@@ -141,12 +233,16 @@ async function loadIndexedDocs() {
       state.indexedFiles.set(doc.file_id, { ...doc, status: 'indexed' });
     }
     renderFileList();
+    updateIndexButton();
   } catch (e) {
     console.warn("Failed to load documents", e);
   }
 }
 
-// --- Drag & Drop ---['dragover', 'drop'].forEach(evt => window.addEventListener(evt, e => e.preventDefault(), false));
+// --- Drag & Drop ---
+['dragover', 'drop'].forEach((evt) => {
+  window.addEventListener(evt, (e) => e.preventDefault(), false);
+});
 
 DOM.uploadZone.addEventListener('dragover', () => DOM.uploadZone.classList.add('drag-over'));
 DOM.uploadZone.addEventListener('dragleave', () => DOM.uploadZone.classList.remove('drag-over'));
@@ -250,17 +346,18 @@ function renderFileList() {
     const ext = f.ext || (f.file_type ? f.file_type.replace('.', '') : null) || getExt(f.file_name) || '?';
 
     // XSS защита: экранирование имени файла в атрибутах
-    const safeName = f.file_name.replace(/"/g, '&quot;');
+    const safeName = escapeHtml(f.file_name || 'Без имени');
+    const safeExt = escapeHtml(ext);
     
     return `
       <div class="file-item">
-        <div class="file-icon">${ext}</div>
+        <div class="file-icon">${safeExt}</div>
         <div class="file-info">
           <div class="file-name" title="${safeName}">${safeName}</div>
           <div class="file-meta">${f.chars ? (f.chars/1000).toFixed(1)+'k симв.' : (f.size || '')}</div>
         </div>
         <div class="file-status ${statusClass}">${statusText}</div>
-        ${isDeletable ? `<button class="file-delete" data-id="${fid}" title="Удалить">×</button>` : ''}
+        ${isDeletable ? `<button class="file-delete" data-id="${fid}" title="Удалить" aria-label="Удалить ${safeName}">×</button>` : ''}
       </div>
     `;
   }).join('');
@@ -319,8 +416,9 @@ DOM.btnIndex.addEventListener('click', async () => {
 });
 
 function formatMessage(text) {
+  const safeText = typeof text === 'string' ? text : String(text ?? '');
   try {
-    let html = marked.parse(text);
+    let html = marked.parse(safeText);
     // Оптимизированный фикс для кода внутри таблиц
     html = html.replace(/<code>([\s\S]*?)<\/code>/g, (match, content) => {
       if (content.match(/&lt;br\s*\/?&gt;/i)) {
@@ -331,7 +429,7 @@ function formatMessage(text) {
     });
     return html;
   } catch (e) {
-    return `<p>${text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/\n/g,'<br>')}</p>`;
+    return `<p>${safeText.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/\n/g,'<br>')}</p>`;
   }
 }
 
@@ -383,8 +481,8 @@ function appendMessage(role, content, meta = null) {
         <div class="source-item">
           <div class="source-score">${Math.round(s.score * 100)}%</div>
           <div>
-            <div class="source-file">${s.file_name} · фрагмент ${s.chunk_index + 1}</div>
-            <div class="source-preview">${s.preview.replace(/</g, '&lt;')}</div>
+            <div class="source-file">${escapeHtml(s.file_name)} · фрагмент ${s.chunk_index + 1}</div>
+            <div class="source-preview">${escapeHtml(s.preview)}</div>
           </div>
         </div>
       `).join('');
@@ -416,9 +514,11 @@ function appendMessage(role, content, meta = null) {
   DOM.chatMessages.appendChild(el);
 
   // Подсветка синтаксиса
-  el.querySelectorAll('pre code').forEach((block) => {
-    hljs.highlightElement(block);
-  });
+  if (window.hljs?.highlightElement) {
+    el.querySelectorAll('pre code').forEach((block) => {
+      window.hljs.highlightElement(block);
+    });
+  }
 
   scrollToBottom();
 
@@ -457,7 +557,7 @@ async function sendMessage() {
 
   DOM.chatInput.value = '';
   DOM.chatInput.style.height = 'auto'; // Сброс высоты
-  DOM.btnSend.disabled = true;
+  setSendLoading(true);
   state.isQuerying = true;
 
   appendMessage('user', question);
@@ -489,7 +589,7 @@ async function sendMessage() {
         state.chatHistory = state.chatHistory.slice(-20);
       }
       
-      typing.remove();
+      if (typing.isConnected) typing.remove();
       appendMessage('bot', d.answer, { bypass: true, model: d.model });
     } else {
       // RAG режим
@@ -502,21 +602,25 @@ async function sendMessage() {
       d = await r.json();
       if (!r.ok) throw new Error(d.detail || 'Query failed');
 
-      typing.remove();
+      if (typing.isConnected) typing.remove();
       appendMessage('bot', d.answer, { confidence: d.confidence, sources: d.sources });
     }
   } catch (e) {
-    typing.remove();
+    if (typing.isConnected) typing.remove();
     appendMessage('bot', `**Ошибка:** ${e.message}`);
     toast(`Не удалось получить ответ`, 'err');
+  } finally {
+    state.isQuerying = false;
+    setSendLoading(false);
+    DOM.chatInput.focus();
+    updateScrollBottomButton();
   }
-
-  state.isQuerying = false;
-  DOM.btnSend.disabled = false;
-  DOM.chatInput.focus();
 }
 
 // Запуск
+updateModeUI();
+updateIndexButton();
+updateScrollBottomButton();
 checkHealth();
 loadIndexedDocs();
 setInterval(checkHealth, 30000);

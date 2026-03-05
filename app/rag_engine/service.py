@@ -1,13 +1,16 @@
+# --- START OF FILE service.py ---
+
 import os
 import time
-import heapq
 import logging
 import asyncio
 import re
+import httpx
 from datetime import datetime, timezone
 from typing import List, Optional
 
 import chromadb
+import numpy as np
 from openai import AsyncOpenAI, APITimeoutError, APIStatusError
 from rank_bm25 import BM25Okapi
 from tenacity import (
@@ -26,6 +29,7 @@ from .config import (
     EMBED_MODEL,
     LLM_MODEL,
     BYPASS_MODEL,
+    RERANK_MODEL,
     MAX_CHUNKS_PER_DOC,
     PENDING_TTL_SECONDS,
     MIN_RELEVANCE_SCORE,
@@ -35,13 +39,13 @@ from .config import (
     MIN_BM25_SCORE,
     BM25_DUMMY_DIST,
     ENABLE_SELF_CHECK,
-    ENABLE_QUERY_EXPANSION,
-    ENABLE_LLM_GRADER
+    ENABLE_QUERY_EXPANSION
 )
 from .text_processor import count_tokens, chunk_text, extract_text
 from .state import RAGState
 
 logger = logging.getLogger(__name__)
+TOKEN_SPLIT_RE = re.compile(r"\W+")
 
 class RAGService:
     def __init__(self):
@@ -70,6 +74,10 @@ class RAGService:
             temperature=0.7,
             max_tokens=4000,
         )
+        self._http_client = httpx.AsyncClient(
+            timeout=httpx.Timeout(30.0),
+            limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+        )
 
         self.chroma = chromadb.PersistentClient(
             path="./chroma_data",
@@ -83,6 +91,7 @@ class RAGService:
         self._pending:      dict[str, dict]         = {}
         self._doc_registry: dict[str, dict]         = {}
         self._index_locks:  dict[str, asyncio.Lock] = {}
+        self._chunks_count: int = self.collection.count()
 
         self.bm25: Optional[BM25Okapi] = None
         self.bm25_ids: List[str] =[]
@@ -105,18 +114,18 @@ class RAGService:
             g.set_entry_point("retrieve")
             
         g.add_node("retrieve",   self._retrieve_node)
-        g.add_node("grade",      self._grade_node)
+        g.add_node("rerank",     self._rerank_node)
         g.add_node("generate",   self._generate_node)
         
         if ENABLE_SELF_CHECK:
             g.add_node("self_check", self._self_check_node)
 
-        g.add_edge("retrieve", "grade")
+        g.add_edge("retrieve", "rerank")
 
         def check_if_chunks_exist(state: RAGState) -> str:
             return "has_chunks" if state.get("chunks") else "empty"
 
-        g.add_conditional_edges("grade", check_if_chunks_exist, {"empty": END, "has_chunks": "generate"})
+        g.add_conditional_edges("rerank", check_if_chunks_exist, {"empty": END, "has_chunks": "generate"})
 
         if ENABLE_SELF_CHECK:
             g.add_edge("generate", "self_check")
@@ -137,7 +146,7 @@ class RAGService:
     async def _rewrite_node(self, state: RAGState) -> dict:
         question = state["question"]
         if state.get("attempts", 0) > 0:
-            return {"queries": [question]}  # При ретрае не расширяем
+            return {"queries": [question]}
             
         sys_msg = SystemMessage(content=(
             "Ты эксперт по семантическому поиску. Твоя задача — сгенерировать 2 альтернативные/синонимичные "
@@ -164,17 +173,15 @@ class RAGService:
         top_k   = state["top_k"]
         k_pool  = max(top_k * 3, 20)
 
-        if self.collection.count() == 0:
+        if self._chunks_count == 0:
             return {"chunks":[]}
 
-        # Выполняем эмбеддинги для всех запросов сразу (Батчинг)
         queries_emb = await self._embed(queries, input_type="query")
         
-        # Пакетный векторный поиск
         vec_res = await asyncio.to_thread(
             self.collection.query,
             query_embeddings=queries_emb,
-            n_results=min(k_pool, self.collection.count()),
+            n_results=min(k_pool, self._chunks_count),
             include=["documents", "metadatas", "distances"],
         )
 
@@ -182,7 +189,6 @@ class RAGService:
         q_vec_ranks = { i: {} for i in range(len(queries)) }
         q_bm25_ranks = { i: {} for i in range(len(queries)) }
         
-        # Обработка векторных результатов по каждому из запросов
         if vec_res and vec_res["ids"]:
             for i, q_ids in enumerate(vec_res["ids"]):
                 if not q_ids: continue
@@ -195,13 +201,12 @@ class RAGService:
                     else:
                         chunk_map[cid][2] = min(chunk_map[cid][2], dist)
 
-        # Выполнение BM25 для каждого запроса
-        bm25_missing_ids =[]
+        bm25_missing_ids = set()
         if self.bm25:
             for i, q in enumerate(queries):
                 tokenized_q = self._tokenize(q)
                 scores = self.bm25.get_scores(tokenized_q)
-                top_indices = heapq.nlargest(k_pool, range(len(scores)), key=lambda idx: scores[idx])
+                top_indices = self._top_k_indices(scores, k_pool)
                 
                 for rank, idx in enumerate(top_indices):
                     score = scores[idx]
@@ -209,16 +214,14 @@ class RAGService:
                         cid = self.bm25_ids[idx]
                         q_bm25_ranks[i][cid] = rank + 1
                         if cid not in chunk_map:
-                            bm25_missing_ids.append(cid)
+                            bm25_missing_ids.add(cid)
                             chunk_map[cid] =["", {}, BM25_DUMMY_DIST, "bm25", float(score)]
                         else:
                             chunk_map[cid][4] = max(chunk_map[cid][4], float(score))
 
-        # Добираем недостающие документы для BM25
         if bm25_missing_ids:
-            bm25_missing_ids = list(set(bm25_missing_ids))
             bm25_docs = await asyncio.to_thread(
-                self.collection.get, ids=bm25_missing_ids, include=["documents", "metadatas"]
+                self.collection.get, ids=list(bm25_missing_ids), include=["documents", "metadatas"]
             )
             if bm25_docs and bm25_docs["ids"]:
                 for cid, doc, meta in zip(bm25_docs["ids"], bm25_docs["documents"], bm25_docs["metadatas"]):
@@ -226,7 +229,6 @@ class RAGService:
                         chunk_map[cid][0] = doc
                         chunk_map[cid][1] = meta
 
-        # Глобальный RRF по всем запросам
         global_rrf = {}
         for i in range(len(queries)):
             all_ids = set(q_vec_ranks[i]) | set(q_bm25_ranks[i])
@@ -242,53 +244,100 @@ class RAGService:
         logger.info(f"[retrieve] Aggregated {len(chunks)} chunks using {len(queries)} queries.")
         return {"chunks": chunks}
 
-    # Узел 3: Оценка контекста (Thresholds + LLM Grader)
-    async def _grade_node(self, state: RAGState) -> dict:
+    @retry(
+        retry=retry_if_exception_type((httpx.RequestError, httpx.HTTPStatusError)),
+        wait=wait_exponential(multiplier=1, min=2, max=15), stop=stop_after_attempt(3),
+        before_sleep=before_sleep_log(logger, logging.WARNING), reraise=True,
+    )
+    async def _call_reranker(self, query: str, passages: list) -> dict:
+        """Вспомогательный метод для обращения к NVIDIA NIM Reranking API"""
+        api_key = os.environ.get("NVIDIA_API_KEY", "placeholder")
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+        }
+        
+        # Точный Payload из документации NVIDIA
+        payload = {
+            "model": RERANK_MODEL,
+            "query": {"text": query},
+            "passages": [{"text": p[0]} for p in passages]
+        }
+        
+        # Облачный API NVIDIA требует внедрение имени модели в URL
+        # При этом точки заменяются на нижние подчеркивания (например "llama-3.2" -> "llama-3_2")
+        model_path = RERANK_MODEL.replace(".", "_")
+        
+        candidate_urls =[
+            # 1. Официальный URL из доков (например: https://ai.api.nvidia.com/v1/retrieval/nvidia/llama-3_2.../reranking)
+            f"https://ai.api.nvidia.com/v1/retrieval/{model_path}/reranking",
+            
+            # 2. On-premise NIM локально (обычный путь)
+            f"{NVIDIA_BASE_URL.rstrip('/')}/ranking",                         
+            
+            # 3. Универсальный fallback NVIDIA (для старых версий API)
+            "https://ai.api.nvidia.com/v1/retrieval/nvidia/reranking"         
+        ]
+
+        for i, url in enumerate(candidate_urls):
+            resp = await self._http_client.post(url, headers=headers, json=payload)
+            
+            if resp.status_code == 404 and i < len(candidate_urls) - 1:
+                logger.debug(f"[rerank] URL {url} returned 404, trying fallback...")
+                continue
+            
+            resp.raise_for_status()
+            return resp.json()
+
+    # Узел 3: Оценка контекста через API-модель Reranker'а
+    async def _rerank_node(self, state: RAGState) -> dict:
         filtered =[
             (doc, meta, dist, source, bm25_score)
             for doc, meta, dist, source, bm25_score in state["chunks"]
             if (source == "vector" and (1 - dist) >= MIN_RELEVANCE_SCORE)
             or (source == "bm25"   and bm25_score >= MIN_BM25_SCORE)
         ]
-        
+
+        if not filtered:
+            logger.info("[rerank] Fast-failing, no chunks passed basic thresholds.")
+            return {
+                "chunks":[],
+                "answer": "К сожалению, в загруженных документах нет релевантной информации.",
+                "confidence": 0.0, "sources":[], "retrieval_type": None
+            }
+
+        try:
+            logger.info(f"[rerank] Running NVIDIA Reranker {RERANK_MODEL} on {len(filtered)} candidates...")
+            rerank_res = await self._call_reranker(state["question"], filtered)
+            
+            rankings = rerank_res.get("rankings",[])
+            reranked_chunks =[]
+            
+            for item in rankings:
+                idx = item.get("index")
+                logit = item.get("logit", 0.0)
+                if idx is not None and idx < len(filtered):
+                    if logit < -5.0:
+                        continue
+                    reranked_chunks.append(filtered[idx])
+                    
+        except Exception as e:
+            logger.warning(f"[rerank] Reranker API failed: {e}. Falling back to default RRF order.")
+            reranked_chunks = filtered
+            
         file_counts: dict[str, int] = {}
-        deduped = []
-        for item in filtered:
+        deduped =[]
+        for item in reranked_chunks:
             fid = item[1].get("file_id", "")
             if file_counts.get(fid, 0) < MAX_CHUNKS_PER_FILE:
                 deduped.append(item)
                 file_counts[fid] = file_counts.get(fid, 0) + 1
-                if len(deduped) == state["top_k"] + 2: # берем чуть больше для LLM-Grader
+                if len(deduped) == state["top_k"]:
                     break
 
-        # CRAG: Фильтрация мусора с помощью LLM (отбраковка нерелевантного контекста)
-        if ENABLE_LLM_GRADER and deduped:
-            logger.info(f"[grade] Running LLM Grader on {len(deduped)} candidates...")
-            
-            async def grade_chunk(chunk):
-                doc = chunk[0]
-                prompt = (
-                    f"Контекст:\n{doc}\n\nВопрос: {state['question']}\n\n"
-                    "Содержит ли этот контекст какую-либо полезную информацию для ответа на вопрос? "
-                    "Ответь строго одним словом: YES или NO."
-                )
-                try:
-                    res = await self._llm.ainvoke([HumanMessage(content=prompt)])
-                    return chunk if "YES" in res.content.upper() else None
-                except:
-                    return chunk # Fail open
-                    
-            graded = await asyncio.gather(*[grade_chunk(c) for c in deduped])
-            llm_filtered =[c for c in graded if c is not None]
-            
-            if not llm_filtered and deduped:
-                logger.info("[grade] LLM filtered all chunks. Using top-1 as fallback.")
-                llm_filtered = deduped[:1]
-                
-            deduped = llm_filtered[:state["top_k"]]
-
         if not deduped:
-            logger.info("[grade] Fast-failing, no relevant chunks.")
+            logger.info("[rerank] Fast-failing, no relevant chunks after reranking.")
             return {
                 "chunks":[],
                 "answer": "К сожалению, в загруженных документах нет релевантной информации.",
@@ -306,7 +355,6 @@ class RAGService:
         context_parts =[]
         total_tokens  = 0
         for doc, meta, dist, source, bm25_score in chunks:
-            # Четкое выделение контекста через теги снижает запутанность
             part = (
                 f'<document source="{meta["file_name"]}" chunk="{meta["chunk_index"]+1}/{meta["total_chunks"]}">\n'
                 f'{doc}\n'
@@ -407,15 +455,32 @@ class RAGService:
 
     # ── BM25 ──────────────────────────────────────────────────────────────────
     def _tokenize(self, text: str) -> list[str]:
-        return[w for w in re.split(r"\W+", text.lower()) if w]
+        return[w for w in TOKEN_SPLIT_RE.split(text.lower()) if w]
+
+    @staticmethod
+    def _top_k_indices(scores, k: int) -> list[int]:
+        if k <= 0:
+            return []
+        arr = np.asarray(scores)
+        if arr.size == 0:
+            return []
+
+        k = min(k, arr.size)
+        if k == arr.size:
+            return np.argsort(arr)[::-1].tolist()
+
+        partition_idx = np.argpartition(arr, -k)[-k:]
+        sorted_top_idx = partition_idx[np.argsort(arr[partition_idx])[::-1]]
+        return sorted_top_idx.tolist()
 
     def _build_bm25_sync(self):
-        if self.collection.count() == 0:
+        self._chunks_count = self.collection.count()
+        if self._chunks_count == 0:
             self.bm25 = None; self.bm25_ids =[]
             return
         docs = self.collection.get(include=["documents"])
         self.bm25_ids = docs["ids"]
-        tokenized = [self._tokenize(d) for d in docs["documents"]]
+        tokenized =[self._tokenize(d) for d in docs["documents"]]
         if tokenized:
             self.bm25 = BM25Okapi(tokenized)
 
@@ -424,7 +489,7 @@ class RAGService:
 
     # ── Doc registry / Helpers ────────────────────────────────────────────────
     def _restore_doc_registry(self):
-        if self.collection.count() == 0: return
+        if self._chunks_count == 0: return
         results = self.collection.get(include=["metadatas"])
         for meta in results["metadatas"]:
             fid = meta.get("file_id", "")
@@ -451,13 +516,14 @@ class RAGService:
             "text": text, "uploaded_at": datetime.now(timezone.utc).isoformat(), "uploaded_ts": time.time(),
         }
 
-    def total_chunks(self) -> int: return self.collection.count()
+    def total_chunks(self) -> int: return self._chunks_count
     def list_documents(self) -> list[dict]: return list(self._doc_registry.values())
 
     async def delete_document(self, file_id: str):
         results = await asyncio.to_thread(self.collection.get, where={"file_id": file_id}, include=[])
         if results["ids"]:
             await asyncio.to_thread(self.collection.delete, ids=results["ids"])
+            self._chunks_count = max(0, self._chunks_count - len(results["ids"]))
             self._doc_registry.pop(file_id, None)
             await self.rebuild_bm25()
 
@@ -489,10 +555,10 @@ class RAGService:
 
             tasks = [get_embedding_batch(chunks[i : i + 32]) for i in range(0, len(chunks), 32)]
             batch_results = await asyncio.gather(*tasks)
-            all_embeddings = [emb for batch in batch_results for emb in batch]
+            all_embeddings =[emb for batch in batch_results for emb in batch]
 
-            ids = [f"{file_id}_chunk_{i:04d}" for i in range(len(chunks))]
-            metadatas = [{
+            ids =[f"{file_id}_chunk_{i:04d}" for i in range(len(chunks))]
+            metadatas =[{
                 "file_id": file_id, "file_name": info["file_name"], "file_type": info["file_type"],
                 "chunk_index": i, "total_chunks": len(chunks), "indexed_at": indexed_at,
             } for i in range(len(chunks))]
@@ -500,6 +566,7 @@ class RAGService:
             await asyncio.to_thread(
                 self.collection.add, ids=ids, embeddings=all_embeddings, documents=chunks, metadatas=metadatas,
             )
+            self._chunks_count = max(0, self._chunks_count - len(old["ids"])) + len(chunks)
 
             self._doc_registry[file_id] = {
                 "file_id": file_id, "file_name": info["file_name"], "file_type": info["file_type"],
@@ -510,6 +577,9 @@ class RAGService:
             self._index_locks.pop(file_id, None)
 
             return { "file_id": file_id, "file_name": info["file_name"], "chunks": len(chunks), "status": "indexed" }
+
+    async def aclose(self):
+        await self._http_client.aclose()
 
     async def query(self, question: str, top_k: int = 7) -> dict:
         initial_state: RAGState = {
@@ -537,12 +607,11 @@ class RAGService:
         response = await self._openai.embeddings.create(
             model=EMBED_MODEL, input=texts, extra_body={"input_type": input_type, "truncate": "END"},
         )
-        return [item.embedding for item in response.data]
+        return[item.embedding for item in response.data]
 
     def _sanitize_model_answer(self, text: str) -> str:
         if not text:
             return ""
-        # Удаляем возможные reasoning-блоки, если модель их вернула
         cleaned = re.sub(r"<think>[\s\S]*?</think>", "", text, flags=re.IGNORECASE)
         cleaned = re.sub(r"```(?:thinking|reasoning)?[\s\S]*?```", "", cleaned, flags=re.IGNORECASE)
         cleaned = cleaned.strip()
@@ -555,7 +624,7 @@ class RAGService:
             "Если вопрос касается документов, предупреди, что у тебя нет доступа к RAG-контексту в bypass-режиме."
         ))
         
-        messages = [system_msg]
+        messages =[system_msg]
         for msg in (history or [])[-10:]:
             role = msg.get("role", "user")
             content = (msg.get("content") or "").strip()
@@ -569,7 +638,6 @@ class RAGService:
         messages.append(HumanMessage(content=message))
         return messages
         
-    # ── Bypass Chat (прямое общение с моделью) ────────────────────────────────
     async def bypass_chat(self, message: str, history: Optional[list[dict]] = None) -> dict:
         messages = self._build_bypass_messages(message, history)
 

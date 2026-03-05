@@ -1,5 +1,6 @@
 import re
 import io
+from functools import lru_cache
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from .config import (
     CHARS_PER_TOKEN,
@@ -7,6 +8,10 @@ from .config import (
     CHUNK_OVERLAP,
     MIN_CHUNK_CHARS,
 )
+
+MULTI_NEWLINE_RE = re.compile(r"\n{3,}")
+CHUNK_CHAR_RATIO = 4
+
 
 def count_tokens(text: str) -> int:
     return int(len(text) / CHARS_PER_TOKEN)
@@ -63,18 +68,25 @@ def extract_text(content: bytes, ext: str, filename: str) -> str:
 
 # ── Chunking (Улучшенный семантический сплиттер) ─────────────────────────────
 
-def chunk_text(text: str, chunk_tokens: int = CHUNK_SIZE, overlap_tokens: int = CHUNK_OVERLAP) -> list[str]:
-    # Очищаем слишком длинные пустоты
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    
-    chunk_chars   = chunk_tokens * 4
-    overlap_chars = overlap_tokens * 4
-
-    splitter = RecursiveCharacterTextSplitter(
+@lru_cache(maxsize=8)
+def _get_splitter(chunk_chars: int, overlap_chars: int) -> RecursiveCharacterTextSplitter:
+    return RecursiveCharacterTextSplitter(
         chunk_size=chunk_chars,
         chunk_overlap=overlap_chars,
-        separators=["\n\n", "\n", ".", "!", "?", " ", ""]
+        separators=["\n\n", "\n", ".", "!", "?", " ", ""],
     )
+
+
+def chunk_text(text: str, chunk_tokens: int = CHUNK_SIZE, overlap_tokens: int = CHUNK_OVERLAP) -> list[str]:
+    # Очищаем слишком длинные пустоты
+    text = MULTI_NEWLINE_RE.sub("\n\n", text)
+    if not text.strip():
+        return []
+    
+    chunk_chars = max(1, int(chunk_tokens * CHUNK_CHAR_RATIO))
+    overlap_chars = max(0, int(overlap_tokens * CHUNK_CHAR_RATIO))
+
+    splitter = _get_splitter(chunk_chars, overlap_chars)
     
     chunks = splitter.split_text(text)
     

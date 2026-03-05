@@ -2,7 +2,7 @@
 <html lang="ru">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="theme-color" content="#0a0b0d">
   <title>RAG · Document Intelligence</title>
   
@@ -24,6 +24,9 @@
       RAG / Document Intelligence
     </div>
     <div class="header-status">
+      <div class="status-pill hidden-mobile" id="mode-status">
+        <span class="mode-chip mode-rag">RAG MODE</span>
+      </div>
       <div class="status-pill" id="api-status">
         <div class="dot dot-yellow"></div>
         <span>checking...</span>
@@ -71,9 +74,10 @@
       </button>
     </div>
   </aside>
+  <div class="sidebar-backdrop" id="sidebar-backdrop" aria-hidden="true"></div>
 
   <main class="chat-area">
-    <div class="chat-messages" id="chat-messages">
+    <div class="chat-messages" id="chat-messages" role="log" aria-live="polite" aria-label="История сообщений">
       <div class="empty-state" id="empty-state">
         <div class="empty-icon">
           <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
@@ -83,8 +87,20 @@
           Загрузите документы в панели слева,<br>
           нажмите <strong style="color:var(--accent)">ИНДЕКСИРОВАТЬ</strong>, затем задавайте вопросы.
         </div>
+        <div class="quick-prompts" id="quick-prompts">
+          <button class="quick-prompt" data-prompt="Сделай краткое резюме всех загруженных документов">Сделать резюме</button>
+          <button class="quick-prompt" data-prompt="Какие ключевые риски или ограничения описаны в документах?">Найти риски</button>
+          <button class="quick-prompt" data-prompt="Составь список важных фактов и чисел из документов">Извлечь факты</button>
+        </div>
       </div>
     </div>
+    <button class="btn-scroll-bottom" id="btn-scroll-bottom" aria-label="Прокрутить к последнему сообщению">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <polyline points="7 13 12 18 17 13"></polyline>
+        <polyline points="7 6 12 11 17 6"></polyline>
+      </svg>
+      <span>Новые сообщения</span>
+    </button>
 
     <div class="chat-input-area">
       <div class="input-row">
@@ -93,7 +109,7 @@
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
         </button>
       </div>
-      <div class="input-hint hidden-mobile">Enter — отправить · Shift+Enter — перенос строки</div>
+      <div class="input-hint hidden-mobile" id="input-hint">Enter — отправить · Shift+Enter — перенос строки</div>
     </div>
   </main>
 </div>
